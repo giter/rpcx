@@ -3,15 +3,15 @@ package rpcx
 import (
 	"crypto/tls"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/rpc"
+	"regexp"
+	"strings"
 	"time"
 
-	"rsc.io/letsencrypt"
-
 	"github.com/hashicorp/net-rpc-msgpackrpc"
+	"github.com/smallnest/rpcx/log"
 )
 
 const (
@@ -141,24 +141,24 @@ func NewServer() *Server {
 // DefaultServer is the default instance of *Server.
 var defaultServer = NewServer()
 
-// Serve starts and listens RCP requests.
+// Serve starts and listens RPC requests.
 //It is blocked until receiving connectings from clients.
 func Serve(n, address string) (err error) {
 	return defaultServer.Serve(n, address)
 }
 
-// ServeTLS starts and listens RCP requests.
+// ServeTLS starts and listens RPC requests.
 //It is blocked until receiving connectings from clients.
 func ServeTLS(n, address string, config *tls.Config) (err error) {
 	return defaultServer.ServeTLS(n, address, config)
 }
 
-// Start starts and listens RCP requests without blocking.
+// Start starts and listens RPC requests without blocking.
 func Start(n, address string) (err error) {
 	return defaultServer.Start(n, address)
 }
 
-// StartTLS starts and listens RCP requests without blocking.
+// StartTLS starts and listens RPC requests without blocking.
 func StartTLS(n, address string, config *tls.Config) (err error) {
 	return defaultServer.StartTLS(n, address, config)
 }
@@ -168,9 +168,14 @@ func ServeListener(ln net.Listener) {
 	defaultServer.ServeListener(ln)
 }
 
-//ServeByHTTP implements RPC via HTTP
-func ServeByHTTP(ln net.Listener, rpcPath, debugPath string) {
+// ServeByHTTP implements RPC via HTTP
+func ServeByHTTP(ln net.Listener) {
 	defaultServer.ServeByHTTP(ln, rpc.DefaultRPCPath)
+}
+
+// ServeByMux implements RPC via HTTP with customized mux
+func ServeByMux(ln net.Listener, mux *http.ServeMux) {
+	defaultServer.ServeByMux(ln, rpc.DefaultRPCPath, mux)
 }
 
 // SetServerCodecFunc sets a ServerCodecFunc
@@ -204,10 +209,20 @@ func Auth(fn AuthorizationFunc) error {
 	return defaultServer.PluginContainer.Add(p)
 }
 
-// Serve starts and listens RCP requests.
+func validIP4(ipAddress string) bool {
+	ipAddress = strings.Trim(ipAddress, " ")
+	i := strings.LastIndex(ipAddress, ":")
+	ipAddress = ipAddress[:i] //remove port
+
+	re, _ := regexp.Compile(`^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$`)
+	return re.MatchString(ipAddress)
+}
+
+// Serve starts and listens RPC requests.
 //It is blocked until receiving connectings from clients.
 func (s *Server) Serve(network, address string) (err error) {
-	ln, err := net.Listen(network, address)
+	var ln net.Listener
+	ln, err = makeListener(network, address)
 	if err != nil {
 		return
 	}
@@ -231,7 +246,7 @@ func (s *Server) Serve(network, address string) (err error) {
 	}
 }
 
-// ServeTLS starts and listens RCP requests.
+// ServeTLS starts and listens RPC requests.
 //It is blocked until receiving connectings from clients.
 func (s *Server) ServeTLS(network, address string, config *tls.Config) (err error) {
 	ln, err := tls.Listen(network, address, config)
@@ -259,17 +274,6 @@ func (s *Server) ServeTLS(network, address string, config *tls.Config) (err erro
 	}
 }
 
-// ServeAutoTLS starts and listens RCP requests with let's encrypt.
-//It is blocked until receiving connectings from clients.
-func (s *Server) ServeAutoTLS(network, address string) (err error) {
-	var m letsencrypt.Manager
-	if err = m.CacheFile("lets.cache"); err != nil {
-		return
-	}
-	tlsConfig := &tls.Config{GetCertificate: m.GetCertificate}
-	return ServeTLS(network, address, tlsConfig)
-}
-
 // ServeListener starts
 func (s *Server) ServeListener(ln net.Listener) {
 	s.listener = ln
@@ -293,10 +297,17 @@ func (s *Server) ServeListener(ln net.Listener) {
 	}
 }
 
-// ServeByHTTP starts
+// ServeByHTTP serves
 func (s *Server) ServeByHTTP(ln net.Listener, rpcPath string) {
 	http.Handle(rpcPath, s)
 	srv := &http.Server{Handler: nil}
+	srv.Serve(ln)
+}
+
+// ServeByMux serves
+func (s *Server) ServeByMux(ln net.Listener, rpcPath string, mux *http.ServeMux) {
+	mux.Handle(rpcPath, s)
+	srv := &http.Server{Handler: mux}
 	srv.Serve(ln)
 }
 
@@ -312,13 +323,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	c, _, err := w.(http.Hijacker).Hijack()
 	if err != nil {
-		log.Println("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		log.Errorf("rpc hijacking %s : %v", req.RemoteAddr, err.Error())
 		return
 	}
 	io.WriteString(c, "HTTP/1.0 "+connected+"\n\n")
 
 	var ok bool
 	if c, ok = s.PluginContainer.DoPostConnAccept(c); !ok {
+		log.Errorf("client is not accepted: %s", c.RemoteAddr().String())
 		return
 	}
 
@@ -330,12 +342,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.rpcServer.ServeCodec(wrapper)
 }
 
-// Start starts and listens RCP requests without blocking.
+// Start starts and listens RPC requests without blocking.
 func (s *Server) Start(network, address string) (err error) {
-
-	ln, err := net.Listen(network, address)
+	var ln net.Listener
+	ln, err = makeListener(network, address)
 
 	if err != nil {
+		log.Errorf("failed to start server: %v", err)
 		return
 	}
 
@@ -350,6 +363,7 @@ func (s *Server) Start(network, address string) (err error) {
 
 			var ok bool
 			if c, ok = s.PluginContainer.DoPostConnAccept(c); !ok {
+				log.Errorf("client is not accepted: %s", c.RemoteAddr().String())
 				continue
 			}
 			wrapper := newServerCodecWrapper(s.PluginContainer, s.ServerCodecFunc(c), c)
@@ -364,10 +378,11 @@ func (s *Server) Start(network, address string) (err error) {
 	return
 }
 
-// StartTLS starts and listens RCP requests without blocking.
+// StartTLS starts and listens RPC requests without blocking.
 func (s *Server) StartTLS(network, address string, config *tls.Config) (err error) {
 	ln, err := tls.Listen(network, address, config)
 	if err != nil {
+		log.Errorf("failed to start server: %v", err)
 		return
 	}
 
@@ -382,6 +397,7 @@ func (s *Server) StartTLS(network, address string, config *tls.Config) (err erro
 
 			var ok bool
 			if c, ok = s.PluginContainer.DoPostConnAccept(c); !ok {
+				log.Errorf("client is not accepted: %s", c.RemoteAddr().String())
 				continue
 			}
 			wrapper := newServerCodecWrapper(s.PluginContainer, s.ServerCodecFunc(c), c)
@@ -394,16 +410,6 @@ func (s *Server) StartTLS(network, address string, config *tls.Config) (err erro
 	}()
 
 	return
-}
-
-// StartTLS starts and listens RCP requests with let's encrypt
-func (s *Server) StartAutoTLS(network, address string) (err error) {
-	var m letsencrypt.Manager
-	if err = m.CacheFile("lets.cache"); err != nil {
-		return
-	}
-	tlsConfig := &tls.Config{GetCertificate: m.GetCertificate}
-	return StartTLS(network, address, tlsConfig)
 }
 
 // Close closes RPC server.

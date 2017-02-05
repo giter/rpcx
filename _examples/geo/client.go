@@ -2,20 +2,20 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"time"
 
 	"github.com/smallnest/rpcx"
 	"github.com/smallnest/rpcx/clientselector"
+	"github.com/smallnest/rpcx/log"
 )
 
 type Args struct {
-	A int `msg:"a"`
-	B int `msg:"b"`
+	A int
+	B int
 }
 
 type Reply struct {
-	C int `msg:"c"`
+	C int
 }
 
 var zk = flag.String("zk", "127.0.0.1:2181", "zookeeper URL")
@@ -36,9 +36,9 @@ func main() {
 	for i := 0; i < 10; i++ {
 		err := client.Call(*n+".Mul", args, &reply)
 		if err != nil {
-			fmt.Printf("error for "+*n+": %d*%d, %v \n", args.A, args.B, err)
+			log.Infof("error for "+*n+": %d*%d, %v", args.A, args.B, err)
 		} else {
-			fmt.Printf(*n+": %d*%d=%d \n", args.A, args.B, reply.C)
+			log.Infof(*n+": %d*%d=%d", args.A, args.B, reply.C)
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/rcrowley/go-metrics"
 	"github.com/samuel/go-zookeeper/zk"
+	"github.com/smallnest/rpcx/log"
 )
 
 //ZooKeeperRegisterPlugin a register plugin which can register services into zookeeper for cluster
@@ -26,8 +27,9 @@ type ZooKeeperRegisterPlugin struct {
 
 // Start starts to connect zookeeper cluster
 func (plugin *ZooKeeperRegisterPlugin) Start() (err error) {
-	conn, _, err := zk.Connect(plugin.ZooKeeperServers, time.Second)
-	plugin.Conn = conn
+	if plugin.Conn, _, err = zk.Connect(plugin.ZooKeeperServers, time.Second); err != nil {
+		return
+	}
 
 	if plugin.UpdateInterval > 0 {
 		ticker := time.NewTicker(plugin.UpdateInterval)
@@ -37,13 +39,15 @@ func (plugin *ZooKeeperRegisterPlugin) Start() (err error) {
 				data := []byte(strconv.FormatInt(clientMeter.Count()/60, 10))
 				//set this same metrics for all services at this server
 				for _, name := range plugin.Services {
-					nodePath := plugin.BasePath + "/" + name + "/" + plugin.ServiceAddress
-					bytes, stat, err := conn.Get(nodePath)
-					if err == nil {
+					nodePath := fmt.Sprintf("%s/%s/%s", plugin.BasePath, name, plugin.ServiceAddress)
+					bytes, stat, err := plugin.Conn.Get(nodePath)
+					if err != nil {
+						log.Infof("can't get data of node: %s, because of %v", nodePath, err.Error())
+					} else {
 						v, _ := url.ParseQuery(string(bytes))
 						v.Set("tps", string(data))
 
-						conn.Set(nodePath, []byte(v.Encode()), stat.Version)
+						plugin.Conn.Set(nodePath, []byte(v.Encode()), stat.Version)
 					}
 
 				}
@@ -53,10 +57,6 @@ func (plugin *ZooKeeperRegisterPlugin) Start() (err error) {
 	}
 
 	return
-}
-
-func updateServerInfo(conn *zk.Conn) {
-
 }
 
 // HandleConnAccept handles connections from clients
@@ -85,7 +85,7 @@ func mkdirs(conn *zk.Conn, path string) (err error) {
 	}
 
 	//check whether this path exists
-	exist, _, err := conn.Exists(path)
+	exist, _, _ := conn.Exists(path)
 	if exist {
 		return nil
 	}
@@ -101,7 +101,7 @@ func mkdirs(conn *zk.Conn, path string) (err error) {
 	createdPath := ""
 	for _, p := range paths {
 		createdPath = createdPath + "/" + p
-		exist, _, err = conn.Exists(createdPath)
+		exist, _, _ = conn.Exists(createdPath)
 		if !exist {
 			_, err = conn.Create(createdPath, []byte(""), flags, acl)
 			if err != nil {
@@ -116,43 +116,82 @@ func mkdirs(conn *zk.Conn, path string) (err error) {
 // Register handles registering event.
 // this service is registered at BASE/serviceName/thisIpAddress node
 func (plugin *ZooKeeperRegisterPlugin) Register(name string, rcvr interface{}, metadata ...string) (err error) {
-	nodePath := plugin.BasePath + "/" + name
-	err = mkdirs(plugin.Conn, nodePath)
-	if err != nil {
-		return err
+	if "" == strings.TrimSpace(name) {
+		err = errors.New("Register service `name` can't be empty")
+		return
+	}
+	nodePath := fmt.Sprintf("%s/%s", plugin.BasePath, name)
+	if err = mkdirs(plugin.Conn, nodePath); err != nil {
+		err = fmt.Errorf("can't create path: %s because of %v", nodePath, err)
+		return
 	}
 
-	nodePath = nodePath + "/" + plugin.ServiceAddress
+	nodePath = fmt.Sprintf("%s/%s/%s", plugin.BasePath, name, plugin.ServiceAddress)
 	//delete existed node
-	exists, _, err := plugin.Conn.Exists(nodePath)
+	var exists bool
+	if exists, _, err = plugin.Conn.Exists(nodePath); err != nil {
+		err = fmt.Errorf("can't check path: %s because of %v", nodePath, err)
+		return
+	}
 	if exists {
-		err = plugin.Conn.Delete(nodePath, -1)
+		if err = plugin.Conn.Delete(nodePath, -1); err != nil {
+			err = fmt.Errorf("can't delete path: %s because of %v", nodePath, err)
+			return
+		}
 	}
 
 	//create Ephemeral node
 	flags := int32(zk.FlagEphemeral)
 	acl := zk.WorldACL(zk.PermAll)
 	_, err = plugin.Conn.Create(nodePath, []byte(strings.Join(metadata, "&")), flags, acl)
+	if err != nil {
+		err = fmt.Errorf("can't create path: %s because of %v", nodePath, err)
+		return
+	}
 
 	plugin.Services = append(plugin.Services, name)
 	return
 }
 
 // Unregister a service from zookeeper but this service still exists in this node.
-func (plugin *ZooKeeperRegisterPlugin) Unregister(name string) {
-	nodePath := plugin.BasePath + "/" + name + "/" + plugin.ServiceAddress
+func (plugin *ZooKeeperRegisterPlugin) Unregister(name string) (err error) {
+	if "" == strings.TrimSpace(name) {
+		err = errors.New("Unregister service `name` can't be empty!")
+		return
+	}
+	nodePath := fmt.Sprintf("%s/%s/%s", plugin.BasePath, name, plugin.ServiceAddress)
 
 	//delete existed node
-	exists, _, _ := plugin.Conn.Exists(nodePath)
+	var exists bool
+	if exists, _, err = plugin.Conn.Exists(nodePath); err != nil {
+		return
+	}
 	if exists {
-		err := plugin.Conn.Delete(nodePath, -1)
+		err = plugin.Conn.Delete(nodePath, -1)
 		if err != nil {
-			fmt.Printf("delete: false because of %v\n", err)
-		} else {
-			fmt.Printf("delete: ok\n")
+			err = errors.New("delete: false because of " + err.Error())
+			return
 		}
 
+		log.Info("delete: ok")
+
 	}
+
+	// because plugin.Start() method will be executed by timer continuously
+	// so it need to remove the service name from service list
+	if plugin.Services == nil || len(plugin.Services) <= 0 {
+		return nil
+	}
+	var index int
+	for index = 0; index < len(plugin.Services); index++ {
+		if plugin.Services[index] == name {
+			break
+		}
+	}
+	if index != len(plugin.Services) {
+		plugin.Services = append(plugin.Services[:index], plugin.Services[index+1:]...)
+	}
+	return
 }
 
 // Name return name of this plugin.

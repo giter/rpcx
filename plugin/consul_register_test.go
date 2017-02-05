@@ -1,11 +1,19 @@
 package plugin
 
 import (
+	"os"
 	"testing"
 	"time"
+
+	"github.com/smallnest/rpcx/log"
 )
 
 func TestConsulRegisterPlugin_Register(t *testing.T) {
+	if os.Getenv("travis") != "" {
+		log.Infof("test in travis-ci.org and it has not installed consul, so don't test this case")
+		return
+	}
+
 	plugin := &ConsulRegisterPlugin{
 		ServiceAddress: "tcp@127.0.0.1:1234",
 		ConsulAddress:  "localhost:8500",

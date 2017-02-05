@@ -1,19 +1,19 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/smallnest/rpcx"
+	"github.com/smallnest/rpcx/log"
 )
 
 type Args struct {
-	A int `msg:"a"`
-	B int `msg:"b"`
+	A int
+	B int
 }
 
 type Reply struct {
-	C int `msg:"c"`
+	C int
 }
 
 func main() {
@@ -24,9 +24,9 @@ func main() {
 	var reply Reply
 	err := client.Call("mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d", args.A, args.B, reply.C)
 	}
 
 	client.Close()

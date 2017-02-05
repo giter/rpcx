@@ -1,6 +1,6 @@
 # rpcx
 
-[![License](https://img.shields.io/:license-apache-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GoDoc](https://godoc.org/github.com/smallnest/rpcx?status.png)](http://godoc.org/github.com/smallnest/rpcx) [![Drone Build Status](https://drone.io/github.com/smallnest/rpcx/status.png)](https://drone.io/github.com/smallnest/rpcx/latest) ![travis](https://travis-ci.org/smallnest/rpcx.svg?branch=master) [![Go Report Card](https://goreportcard.com/badge/github.com/smallnest/rpcx)](https://goreportcard.com/report/github.com/smallnest/rpcx)
+[![License](https://img.shields.io/:license-apache-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GoDoc](https://godoc.org/github.com/smallnest/rpcx?status.png)](http://godoc.org/github.com/smallnest/rpcx) [![Drone Build Status](https://drone.io/github.com/smallnest/rpcx/status.png)](https://drone.io/github.com/smallnest/rpcx/latest) [![travis](https://travis-ci.org/smallnest/rpcx.svg?branch=master)](https://travis-ci.org/smallnest/rpcx) [![Go Report Card](https://goreportcard.com/badge/github.com/smallnest/rpcx)](https://goreportcard.com/report/github.com/smallnest/rpcx)
 
 
 rpcx是一个类似阿里巴巴 [Dubbo](http://dubbo.io/) 和微博 [Motan](https://github.com/weibocom/motan) 的分布式的RPC服务框架，基于Golang net/rpc实现。 
@@ -80,12 +80,14 @@ rpcx使用Go实现，适合使用Go语言实现RPC的功能。
 * 基于地理位置的路由
 * 支持zip 和 snappy 格式的压缩传输
 * 服务别名
+* [kcp](https://github.com/xtaci/kcp-go) support: kcp是一个可信赖的全功能的UDP库实现
+
 
  rpcx更正和实现了下列官方库不支持的特性：
  
 * [#16449](https://github.com/golang/go/issues/16449): proposal: support custom method names in net/rpc
 * [#15236](https://github.com/golang/go/issues/15236): net/rpc: expected Timeout based alternatives to functions for rpc.Dial, rpc.DialHTTP, rpc.DialHTTPPath [proposal].
-* [#13395](https://github.com/golang/go/issues/13395): **TODO** net/rpc: Server.ServeHTTP assumes default http mux
+* [#13395](https://github.com/golang/go/issues/13395): net/rpc: Server.ServeHTTP assumes default http mux
 * [#10929](https://github.com/golang/go/issues/10929): net/rpc/jsonrpc: Missing support for JSON-RPC 2.0
 * [#7946](https://github.com/golang/go/issues/7946): net/rpc: add client support for RPC over https
 * [#4591](https://github.com/golang/go/issues/4591): Authentication for RPC and HTTP
@@ -274,11 +276,11 @@ func main() {
 
 	fn := func(p *plugin.AuthorizationAndServiceMethod) error {
 		if p.Authorization != "0b79bab50daca910b000d4f1a2b675d604257e42" || p.Tag != "Bearer" {
-			fmt.Printf("error: wrong Authorization: %s, %s\n", p.Authorization, p.Tag)
+			log.Infof("error: wrong Authorization: %s, %s\n", p.Authorization, p.Tag)
 			return errors.New("Authorization failed ")
 		}
 
-		fmt.Println("Authorization success")
+		log.Infof("Authorization success")
 		return nil
 	}
 
@@ -298,16 +300,16 @@ func main() {
 	//add Authorization info
 	err := client.Auth("0b79bab50daca910b000d4f1a2b675d604257e42_ABC", "Bearer")
 	if err != nil {
-		fmt.Printf("can't add auth plugin: %#v\n", err)
+		log.Infof("can't add auth plugin: %#v\n", err)
 	}
 
 	args := &Args{7, 8}
 	var reply Reply
 	err = client.Call("Arith.Mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()
@@ -381,9 +383,9 @@ func main() {
 	var reply Reply
 	err := client.Call("Arith.Mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()
@@ -419,9 +421,9 @@ func main() {
 	divCall := client.Go("Arith.Mul", args, &reply, nil)
 	replyCall := <-divCall.Done // will be equal to divCall
 	if replyCall.Error != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, replyCall.Error)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, replyCall.Error)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()
@@ -522,9 +524,9 @@ func callServer(s rpcx.ClientSelector) {
 	var reply Reply
 	err := client.Call("Arith.Mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()
@@ -571,9 +573,9 @@ func callServer(s rpcx.ClientSelector) {
 	var reply Reply
 	err := client.Call("Arith.Mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()
@@ -622,9 +624,9 @@ func callServer(s rpcx.ClientSelector) {
 	var reply Reply
 	err := client.Call("Arith.Mul", args, &reply)
 	if err != nil {
-		fmt.Printf("error for Arith: %d*%d, %v \n", args.A, args.B, err)
+		log.Infof("error for Arith: %d*%d, %v \n", args.A, args.B, err)
 	} else {
-		fmt.Printf("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
+		log.Infof("Arith: %d*%d=%d \n", args.A, args.B, reply.C)
 	}
 
 	client.Close()

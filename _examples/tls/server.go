@@ -2,18 +2,18 @@ package main
 
 import (
 	"crypto/tls"
-	"log"
 
 	"github.com/smallnest/rpcx"
+	"github.com/smallnest/rpcx/log"
 )
 
 type Args struct {
-	A int `msg:"a"`
-	B int `msg:"b"`
+	A int
+	B int
 }
 
 type Reply struct {
-	C int `msg:"c"`
+	C int
 }
 
 type Arith int
@@ -29,7 +29,7 @@ func main() {
 
 	cert, err := tls.LoadX509KeyPair("server.pem", "server.key")
 	if err != nil {
-		log.Println(err)
+		log.Info(err)
 		return
 	}
 

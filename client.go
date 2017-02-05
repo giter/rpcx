@@ -1,16 +1,16 @@
 package rpcx
 
 import (
-	"bufio"
 	"crypto/tls"
 	"errors"
 	"io"
 	"net"
-	"net/http"
 	"net/rpc"
 	"time"
 
 	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
+	"github.com/smallnest/rpcx/log"
+	kcp "github.com/xtaci/kcp-go"
 )
 
 // SelectMode defines the algorithm of selecting a services from cluster
@@ -37,6 +37,7 @@ var selectModeStrs = [...]string{
 	"WeightedRoundRobin",
 	"WeightedICMP",
 	"ConsistentHash",
+	"Closest",
 }
 
 func (s SelectMode) String() string {
@@ -68,6 +69,8 @@ type ClientSelector interface {
 	SetSelectMode(SelectMode)
 	//AllClients returns all Clients
 	AllClients(clientCodecFunc ClientCodecFunc) []*rpc.Client
+	//handle failed client
+	HandleFailedClient(client *rpc.Client)
 }
 
 // DirectClientSelector is used to a direct rpc server.
@@ -107,101 +110,9 @@ func (s *DirectClientSelector) AllClients(clientCodecFunc ClientCodecFunc) []*rp
 	return []*rpc.Client{s.rpcClient}
 }
 
-// NewDirectRPCClient creates a rpc client
-func NewDirectRPCClient(c *Client, clientCodecFunc ClientCodecFunc, network, address string, timeout time.Duration) (*rpc.Client, error) {
-	//if network == "http" || network == "https" {
-	if network == "http" {
-		return NewDirectHTTPRPCClient(c, clientCodecFunc, network, address, "", timeout)
-	}
-
-	var conn net.Conn
-	var tlsConn *tls.Conn
-	var err error
-
-	if c != nil && c.TLSConfig != nil {
-		dialer := &net.Dialer{
-			Timeout: timeout,
-		}
-		tlsConn, err = tls.DialWithDialer(dialer, network, address, c.TLSConfig)
-		//or conn:= tls.Client(netConn, &config)
-
-		conn = net.Conn(tlsConn)
-	} else {
-		conn, err = net.DialTimeout(network, address, timeout)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	var ok bool
-	if conn, ok = c.PluginContainer.DoPostConnected(conn); !ok {
-		return nil, errors.New("failed to do post connected")
-	}
-
-	if c == nil || c.PluginContainer == nil {
-		return rpc.NewClientWithCodec(clientCodecFunc(conn)), nil
-	}
-
-	wrapper := newClientCodecWrapper(c.PluginContainer, clientCodecFunc(conn), conn)
-	wrapper.Timeout = c.Timeout
-	wrapper.ReadTimeout = c.ReadTimeout
-	wrapper.WriteTimeout = c.WriteTimeout
-
-	return rpc.NewClientWithCodec(wrapper), nil
-}
-
-// NewDirectHTTPRPCClient creates a rpc http client
-func NewDirectHTTPRPCClient(c *Client, clientCodecFunc ClientCodecFunc, network, address string, path string, timeout time.Duration) (*rpc.Client, error) {
-	if path == "" {
-		path = rpc.DefaultRPCPath
-	}
-
-	var conn net.Conn
-	var tlsConn *tls.Conn
-	var err error
-
-	if c != nil && c.TLSConfig != nil {
-		dialer := &net.Dialer{
-			Timeout: timeout,
-		}
-		tlsConn, err = tls.DialWithDialer(dialer, "tcp", address, c.TLSConfig)
-		//or conn:= tls.Client(netConn, &config)
-
-		conn = net.Conn(tlsConn)
-	} else {
-		conn, err = net.DialTimeout("tcp", address, timeout)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	io.WriteString(conn, "CONNECT "+path+" HTTP/1.0\n\n")
-
-	// Require successful HTTP response
-	// before switching to RPC protocol.
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
-	if err == nil && resp.Status == connected {
-		if c == nil || c.PluginContainer == nil {
-			return rpc.NewClientWithCodec(clientCodecFunc(conn)), nil
-		}
-		wrapper := newClientCodecWrapper(c.PluginContainer, clientCodecFunc(conn), conn)
-		wrapper.Timeout = c.Timeout
-		wrapper.ReadTimeout = c.ReadTimeout
-		wrapper.WriteTimeout = c.WriteTimeout
-
-		return rpc.NewClientWithCodec(wrapper), nil
-	}
-	if err == nil {
-		err = errors.New("unexpected HTTP response: " + resp.Status)
-	}
-	conn.Close()
-	return nil, &net.OpError{
-		Op:   "dial-http",
-		Net:  network + " " + address,
-		Addr: nil,
-		Err:  err,
-	}
+func (s *DirectClientSelector) HandleFailedClient(client *rpc.Client) {
+	client.Close()
+	s.rpcClient = nil // reset
 }
 
 // ClientCodecFunc is used to create a rpc.ClientCodecFunc from net.Conn.
@@ -214,6 +125,7 @@ type Client struct {
 	PluginContainer IClientPluginContainer
 	FailMode        FailMode
 	TLSConfig       *tls.Config
+	Block           kcp.BlockCrypt
 	Retries         int
 	//Timeout sets deadline for underlying net.Conns
 	Timeout time.Duration
@@ -251,19 +163,23 @@ func (c *Client) Close() error {
 //Call invokes the named function, waits for it to complete, and returns its error status.
 func (c *Client) Call(serviceMethod string, args interface{}, reply interface{}) (err error) {
 	if c.FailMode == Broadcast {
-		return c.clientBroadCast(serviceMethod, args, reply)
+		return c.clientBroadCast(serviceMethod, args, &reply)
 	}
 	if c.FailMode == Forking {
-		return c.clientForking(serviceMethod, args, reply)
+		return c.clientForking(serviceMethod, args, &reply)
 	}
 
+	var rpcClient *rpc.Client
 	//select a rpc.Client and call
-	rpcClient, err := c.ClientSelector.Select(c.ClientCodecFunc, serviceMethod, args)
+	rpcClient, err = c.ClientSelector.Select(c.ClientCodecFunc, serviceMethod, args)
 	//selected
 	if err == nil && rpcClient != nil {
 		if err = rpcClient.Call(serviceMethod, args, reply); err == nil {
 			return //call successful
 		}
+
+		log.Errorf("failed to call: %v", err)
+		c.ClientSelector.HandleFailedClient(rpcClient)
 	}
 
 	if c.FailMode == Failover {
@@ -277,17 +193,27 @@ func (c *Client) Call(serviceMethod string, args interface{}, reply interface{})
 			if err == nil {
 				return nil
 			}
+
+			log.Errorf("failed to call: %v", err)
+			c.ClientSelector.HandleFailedClient(rpcClient)
+
 		}
 	} else if c.FailMode == Failtry {
 		for retries := 0; retries < c.Retries; retries++ {
 			if rpcClient == nil {
-				rpcClient, err = c.ClientSelector.Select(c.ClientCodecFunc, serviceMethod, args)
+				if rpcClient, err = c.ClientSelector.Select(c.ClientCodecFunc, serviceMethod, args); err != nil {
+					log.Errorf("failed to select a client: %v", err)
+				}
 			}
+
 			if rpcClient != nil {
 				err = rpcClient.Call(serviceMethod, args, reply)
 				if err == nil {
 					return nil
 				}
+
+				log.Errorf("failed to call: %v", err)
+				c.ClientSelector.HandleFailedClient(rpcClient)
 			}
 		}
 	}
@@ -295,10 +221,11 @@ func (c *Client) Call(serviceMethod string, args interface{}, reply interface{})
 	return
 }
 
-func (c *Client) clientBroadCast(serviceMethod string, args interface{}, reply interface{}) (err error) {
+func (c *Client) clientBroadCast(serviceMethod string, args interface{}, reply *interface{}) (err error) {
 	rpcClients := c.ClientSelector.AllClients(c.ClientCodecFunc)
 
 	if len(rpcClients) == 0 {
+		log.Infof("no any client is available")
 		return nil
 	}
 
@@ -311,19 +238,23 @@ func (c *Client) clientBroadCast(serviceMethod string, args interface{}, reply i
 	for l > 0 {
 		call := <-done
 		if call == nil || call.Error != nil {
+			if call != nil {
+				log.Warnf("failed to call: %v", call.Error)
+			}
 			return errors.New("some clients return Error")
 		}
-		reply = call.Reply
+		*reply = call.Reply
 		l--
 	}
 
 	return nil
 }
 
-func (c *Client) clientForking(serviceMethod string, args interface{}, reply interface{}) (err error) {
+func (c *Client) clientForking(serviceMethod string, args interface{}, reply *interface{}) (err error) {
 	rpcClients := c.ClientSelector.AllClients(c.ClientCodecFunc)
 
 	if len(rpcClients) == 0 {
+		log.Infof("no any client is available")
 		return nil
 	}
 
@@ -336,11 +267,14 @@ func (c *Client) clientForking(serviceMethod string, args interface{}, reply int
 	for l > 0 {
 		call := <-done
 		if call != nil && call.Error == nil {
-			reply = call.Reply
+			*reply = call.Reply
 			return nil
 		}
 		if call == nil {
 			break
+		}
+		if call.Error != nil {
+			log.Warnf("failed to call: %v", call.Error)
 		}
 		l--
 	}
@@ -387,11 +321,13 @@ func (w *clientCodecWrapper) ReadRequestHeader(r *rpc.Response) error {
 	//pre
 	err := w.PluginContainer.DoPreReadResponseHeader(r)
 	if err != nil {
+		log.Errorf("failed to DoPreReadResponseHeader: %v", err)
 		return err
 	}
 
 	err = w.ClientCodec.ReadResponseHeader(r)
 	if err != nil {
+		log.Errorf("failed to ReadResponseHeader: %v", err)
 		return err
 	}
 
@@ -403,11 +339,13 @@ func (w *clientCodecWrapper) ReadRequestBody(body interface{}) error {
 	//pre
 	err := w.PluginContainer.DoPreReadResponseBody(body)
 	if err != nil {
+		log.Errorf("failed to DoPreReadResponseBody: %v", err)
 		return err
 	}
 
 	err = w.ClientCodec.ReadResponseBody(body)
 	if err != nil {
+		log.Errorf("failed to ReadResponseBody: %v", err)
 		return err
 	}
 
@@ -426,11 +364,13 @@ func (w *clientCodecWrapper) WriteRequest(r *rpc.Request, body interface{}) erro
 	//pre
 	err := w.PluginContainer.DoPreWriteRequest(r, body)
 	if err != nil {
+		log.Errorf("failed to DoPreWriteRequest: %v", err)
 		return err
 	}
 
 	err = w.ClientCodec.WriteRequest(r, body)
 	if err != nil {
+		log.Errorf("failed to WriteRequest: %v", err)
 		return err
 	}
 

@@ -10,12 +10,12 @@ import (
 )
 
 type Args struct {
-	A int `msg:"a"`
-	B int `msg:"b"`
+	A int
+	B int
 }
 
 type Reply struct {
-	C int `msg:"c"`
+	C int
 }
 
 type Arith int
@@ -42,7 +42,7 @@ func main() {
 		EtcdServers:    []string{*e},
 		BasePath:       "/rpcx",
 		Metrics:        metrics.NewRegistry(),
-		Services:       make([]string, 1),
+		Services:       make([]string, 0),
 		UpdateInterval: time.Minute,
 	}
 	rplugin.Start()

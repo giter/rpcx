@@ -8,24 +8,25 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/net/context"
 
 	"github.com/coreos/etcd/client"
 	"github.com/smallnest/rpcx"
+	"github.com/smallnest/rpcx/log"
+	"golang.org/x/net/context"
 )
 
 // EtcdClientSelector is used to select a rpc server from etcd.
 type EtcdClientSelector struct {
 	EtcdServers        []string
 	KeysAPI            client.KeysAPI
-	ticker             *time.Ticker
 	sessionTimeout     time.Duration
 	BasePath           string //should endwith serviceName
 	Servers            []string
 	Group              string
 	clientAndServer    map[string]*rpc.Client
+	clientRWMutex      sync.RWMutex
 	metadata           map[string]string
 	Latitude           float64
 	Longitude          float64
@@ -72,7 +73,10 @@ func (s *EtcdClientSelector) AllClients(clientCodecFunc rpcx.ClientCodecFunc) []
 	for _, sv := range s.Servers {
 		ss := strings.Split(sv, "@")
 		c, err := rpcx.NewDirectRPCClient(s.Client, clientCodecFunc, ss[0], ss[1], s.dailTimeout)
-		if err == nil {
+		if err != nil {
+			log.Fatalf("rpc client connect server failed: %v", err.Error())
+			continue
+		} else {
 			clients = append(clients, c)
 		}
 	}
@@ -88,17 +92,11 @@ func (s *EtcdClientSelector) start() {
 	})
 
 	if err != nil {
+		log.Fatal("etcd new client failed: %v", err.Error())
 		return
 	}
 	s.KeysAPI = client.NewKeysAPI(cli)
 	s.pullServers()
-
-	// s.ticker = time.NewTicker(s.sessionTimeout)
-	// go func() {
-	// 	for range s.ticker.C {
-	// 		s.pullServers()
-	// 	}
-	// }()
 
 	go s.watch()
 }
@@ -120,7 +118,9 @@ func (s *EtcdClientSelector) watch() {
 			if !res.Node.Dir {
 				// clientAndServer delete the invalid client connection
 				removedServer := strings.TrimPrefix(res.Node.Key, s.BasePath+"/")
+				s.clientRWMutex.Lock()
 				delete(s.clientAndServer, removedServer)
+				s.clientRWMutex.Unlock()
 			}
 		} else if res.Action == "set" || res.Action == "update" {
 			s.pullServers()
@@ -209,23 +209,43 @@ func (s *EtcdClientSelector) removeInactiveServers(inactiveServers []int) {
 		removedServer := s.Servers[k]
 		s.Servers = append(s.Servers[0:k], s.Servers[k+1:]...)
 		s.WeightedServers = append(s.WeightedServers[0:k], s.WeightedServers[k+1:]...)
+		s.clientRWMutex.RLock()
 		c := s.clientAndServer[removedServer]
+		s.clientRWMutex.RUnlock()
 		if c != nil {
+			s.clientRWMutex.Lock()
 			delete(s.clientAndServer, removedServer)
+			s.clientRWMutex.Unlock()
 			c.Close() //close connection to inactive server
 		}
 	}
 }
 
 func (s *EtcdClientSelector) getCachedClient(server string, clientCodecFunc rpcx.ClientCodecFunc) (*rpc.Client, error) {
+	s.clientRWMutex.RLock()
 	c := s.clientAndServer[server]
+	s.clientRWMutex.RUnlock()
 	if c != nil {
 		return c, nil
 	}
 	ss := strings.Split(server, "@") //
 	c, err := rpcx.NewDirectRPCClient(s.Client, clientCodecFunc, ss[0], ss[1], s.dailTimeout)
+	s.clientRWMutex.Lock()
 	s.clientAndServer[server] = c
+	s.clientRWMutex.Unlock()
 	return c, err
+}
+
+func (s *EtcdClientSelector) HandleFailedClient(client *rpc.Client) {
+	for k, v := range s.clientAndServer {
+		if v == client {
+			s.clientRWMutex.Lock()
+			delete(s.clientAndServer, k)
+			s.clientRWMutex.Unlock()
+		}
+		client.Close()
+		break
+	}
 }
 
 // Select returns a rpc client
